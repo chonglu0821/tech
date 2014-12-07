@@ -1,0 +1,407 @@
+测试namespace网络连通：
+1. 创建一个network namespace foo
+# ip netns add foo
+2. 查看network namespace
+# ip netns
+3. 创建一对网卡
+# ip link add tap-foo type veth peer name tap-root
+4. 查看创建的网卡
+# ip a
+5. 查看是否成对，index应该是连续的
+# ethtool -S tap-foo
+# ethrool -S tap-root
+6. 将tap-foo分配到foo namespace中
+# ip link set tap-foo netns foo
+7. 为tap-foo添加一个ip地址
+# ip netns exec foo ip addr add 192.168.10.2/24 dev tap-foo 
+# ip netns exec foo ip link set tap-foo up
+8. 查看foo空间中的网卡信息
+# ip netns exec foo ip a
+9. 为root namespace中的tap-root添加ip
+# ip addr add 192.168.10.1/24 dev tap-root
+# ip link set tap-root up
+10. 查看root空间中的网卡信息
+# ip a
+11. 检查是否网络连通
+# ping 192.168.10.2
+# ip netns exec foo ping 192.168.10.1
+
+通过openvswitch联通物理机与虚拟机：
+1. 安装软件包
+# yum install libvirt openvswitch python-virtinst xauth tigervnc -y
+2. 删除默认的libvirt网络
+# virsh net-destroy default
+# virsh net-autostart --disable default
+# virsh net-undefine default
+3. 启动openvswitch
+# service openvswitch start
+# chkconfig openvswitch on
+4. 创建一个bridge
+# ovs-vsctl add-br br-int
+5. 建立一个libvirt网络
+# mkdir /var/tmp/gre
+# cd /var/tmp/gre
+# vim libvirt-vlans.xml
+
+<network>
+  <name>ovs-network</name>
+  <forward mode='bridge'/>
+  <bridge name='br-int'/>
+  <virtualport type='openvswitch'/>
+  <portgroup name='no-vlan' default='yes'>
+  </portgroup>
+  <portgroup name='vlan-100'>
+    <vlan>
+      <tag id='100'/>
+    </vlan>
+  </portgroup>
+  <portgroup name='vlan-200'>
+    <vlan>
+      <tag id='200'/>
+    </vlan>
+  </portgroup>
+</network>
+6. 启动libvirt网络
+# virsh net-define libvirt-vlans.xml
+# virsh net-autostart ovs-network
+# virsh net-start ovs-network
+7. 创建一个instance，并连接到ovs-network
+# vim instance1.xml
+
+<domain type="qemu">
+  <uuid>23469de0-a3a0-4214-a60e-a45322bcc370</uuid>
+  <name>instance1</name>
+  <memory>524288</memory>
+  <vcpu>1</vcpu>
+  <sysinfo type="smbios">
+    <system>
+      <entry name="manufacturer">Red Hat Inc.</entry>
+      <entry name="product">OpenStack Nova</entry>
+      <entry name="version">2014.1.1-3.el6</entry>
+      <entry name="serial">b8d4ec5f-acd6-7111-c69b-600912a079bb</entry>
+      <entry name="uuid">23469de0-a3a0-4214-a60e-a45322bcc370</entry>
+    </system>
+  </sysinfo>
+  <os>
+    <type>hvm</type>
+    <boot dev="hd"/>
+    <smbios mode="sysinfo"/>
+  </os>
+  <features>
+    <acpi/>
+    <apic/>
+  </features>
+  <clock offset="utc"/>
+  <cpu mode="host-model" match="exact"/>
+  <devices>
+    <disk type="file" device="disk">
+      <driver name="qemu" type="qcow2" cache="none"/>
+      <source file="/var/tmp/gre/instance1.img"/>
+      <target bus="virtio" dev="vda"/>
+    </disk>
+    <interface type='network'>
+      <source network='ovs-network' portgroup='vlan-100'/>
+      <model type='virtio'/>
+    </interface>
+    <serial type="file">
+      <source path="/var/tmp/gre/instance1.log"/>
+    </serial>
+    <serial type="pty"/>
+    <input type="tablet" bus="usb"/>
+    <graphics type="vnc" autoport="yes" keymap="en-us" listen="0.0.0.0"/>
+    <video>
+      <model type="cirrus"/>
+    </video>
+  </devices>
+</domain>
+8. 启动虚拟机
+# wget http://cdn.download.cirros-cloud.net/0.3.0/cirros-0.3.0-x86_64-disk.img
+# mv cirros-0.3.0-x86_64-disk.img instance1.img
+# virsh define instance1.xml
+# virsh start instance1
+# virsh vncdisplay instance1
+# vncviewer :0
+9. 在虚拟机中添加ip地址
+# ip addr add 192.168.1.20/24 dev eth0
+10. 查看openvswitch bridge
+# ovs-vsctl show
+11. 添加一个openvswitch port
+# ip link add br-int-tap100 type veth peer name tap100
+# ovs-vsctl add-port br-int br-int-tap100
+# ovs-vsctl set port br-int-tap100 tag=100
+# ip addr add 192.168.1.21/24 dev tap100
+# ip link set tap100 up
+# ip link set br-int-tap100 up
+12. 测试
+# ping 192.168.1.20
+# ssh cirros@192.168.1.20
+
+
+Neutron SDN 手动实现
+https://github.com/yongluo2013/osf-openstack-training/blob/master/installation/mock-neutron-sdn-with-ovs-gre.md
+network1
+     eth0:10.20.0.201   (management network)
+     eht1:172.16.0.201   (public/external network)
+     eht2:192.168.4.201  (private network，gre tunning)
+compute1
+     eth0:10.20.0.202   (management network)
+     eht1:(disabled)
+     eht2:192.168.4.202  (private network，gre tunning)
+
+network1
+1. 安装需要用到的包
+yum install libvirt openvswitch python-virtinst xauth tigervnc -y
+2. 移除默认的libvirt 网络，方便清晰分析网络情况
+virsh net-destroy default
+virsh net-autostart --disable default
+virsh net-undefine default
+3. 设置允许ipforwarding
+vim /etc/sysctl.conf
+
+net.ipv4.ip_forward = 1
+net.ipv4.conf.all.rp_filter = 0
+net.ipv4.conf.default.rp_filter = 0
+4. 立即生效内核参数
+sysctl -p
+5. 启动openvswitch
+service openvswitch start
+chkconfig openvswitch on
+6. 创建一个linux bridge
+brctl addbr qbr01
+ip link set qbr01 up
+7. 创建一个instance，并连接到qbr01 Bridge
+mkdir /var/tmp/gre
+cd /var/tmp/gre
+wget http://cdn.download.cirros-cloud.net/0.3.1/cirros-0.3.1-x86_64-disk.img
+mv cirros-0.3.1-x86_64-disk.img instance1.img
+vim instance1.xml
+
+<domain type="qemu">
+  <uuid>23469de0-a3a0-4214-a60e-a45322bcc370</uuid>
+  <name>instance1</name>
+  <memory>524288</memory>
+  <vcpu>1</vcpu>
+  <sysinfo type="smbios">
+    <system>
+      <entry name="manufacturer">Red Hat Inc.</entry>
+      <entry name="product">OpenStack Nova</entry>
+      <entry name="version">2014.1.1-3.el6</entry>
+      <entry name="serial">b8d4ec5f-acd6-7111-c69b-600912a079bb</entry>
+      <entry name="uuid">23469de0-a3a0-4214-a60e-a45322bcc370</entry>
+    </system>
+  </sysinfo>
+  <os>
+    <type>hvm</type>
+    <boot dev="hd"/>
+    <smbios mode="sysinfo"/>
+  </os>
+  <features>
+    <acpi/>
+    <apic/>
+  </features>
+  <clock offset="utc"/>
+  <cpu mode="host-model" match="exact"/>
+  <devices>
+    <disk type="file" device="disk">
+      <driver name="qemu" type="qcow2" cache="none"/>
+      <source file="/var/tmp/gre/instance1.img"/>
+      <target bus="virtio" dev="vda"/>
+    </disk>
+  <interface type='bridge'>
+      <source bridge='qbr01'/>
+      <target dev='tap01'/>
+      <model type='virtio'/>
+      <driver name='qemu'/>
+      <address type='pci' domain='0x0000' bus='0x00' slot='0x03' function='0x0'/>
+    </interface>
+    <serial type="file">
+      <source path="/var/tmp/gre/instance1.log"/>
+    </serial>
+    <serial type="pty"/>
+    <input type="tablet" bus="usb"/>
+    <graphics type="vnc" autoport="yes" keymap="en-us" listen="0.0.0.0"/>
+    <video>
+      <model type="cirrus"/>
+    </video>
+  </devices>
+</domain>
+8. 启动instance
+virsh define instance1.xml
+virsh start instance1
+virsh vncdisplay instance1
+vncviewer :0
+9. 启动console 以后,登录添加ip 地址 192.168.1.11
+ip addr add 192.168.1.11/24 dev eth0
+route add default gw 192.168.1.1
+10. 创建一个内部bridge br-int， 模拟 OpenStack integrated bridge
+ovs-vsctl add-br br-int
+ovs-vsctl add-port br-int gre0 -- set interface gre0 type=gre options:remote_ip=192.168.4.202
+11. 创建一个veth peer，连接Linux Bridge 'qbr01' 和 OpenvSwich Bridge 'br-ini'
+ip link add qvo01 type veth peer name qvb01
+brctl addif qbr01 qvb01
+ovs-vsctl add-port br-int qvo01
+ovs-vsctl set port qvo01 tag=100
+ip link set qvb01 up
+ip link set qvo01 up
+12. 查看现在network1上的 br-int
+ovs-vsctl show
+
+compute1:
+1. 安装需要用到的包
+yum install libvirt openvswitch python-virtinst xauth tigervnc -y
+2. 移除默认的libvirt 网络，方便清晰分析网络情况
+virsh net-destroy default
+virsh net-autostart --disable default
+virsh net-undefine default
+3. 设置允许ipforwarding
+vim /etc/sysctl.conf
+
+net.ipv4.ip_forward = 1
+net.ipv4.conf.all.rp_filter = 0
+net.ipv4.conf.default.rp_filter = 0
+4. 立即生效内核参数
+sysctl -p
+5. 启动openvswitch
+service openvswitch start
+chkconfig openvswitch on
+6. 创建一个linux bridge
+brctl addbr qbr02
+ip link set qbr02 up
+7. 创建一个instance，并连接到qbr02 Bridge
+mkdir /var/tmp/gre
+cd /var/tmp/gre
+wget http://cdn.download.cirros-cloud.net/0.3.1/cirros-0.3.1-x86_64-disk.img
+mv cirros-0.3.1-x86_64-disk.img instance2.img
+vim instance2.xml
+
+<domain type="qemu">
+  <uuid>23469de0-a3a0-4214-a60e-a45322bcc370</uuid>
+  <name>instance2</name>
+  <memory>524288</memory>
+  <vcpu>1</vcpu>
+  <sysinfo type="smbios">
+    <system>
+      <entry name="manufacturer">Red Hat Inc.</entry>
+      <entry name="product">OpenStack Nova</entry>
+      <entry name="version">2014.1.1-3.el6</entry>
+      <entry name="serial">b8d4ec5f-acd6-7111-c69b-600912a079bb</entry>
+      <entry name="uuid">23469de0-a3a0-4214-a60e-a45322bcc370</entry>
+    </system>
+  </sysinfo>
+  <os>
+    <type>hvm</type>
+    <boot dev="hd"/>
+    <smbios mode="sysinfo"/>
+  </os>
+  <features>
+    <acpi/>
+    <apic/>
+  </features>
+  <clock offset="utc"/>
+  <cpu mode="host-model" match="exact"/>
+  <devices>
+    <disk type="file" device="disk">
+      <driver name="qemu" type="qcow2" cache="none"/>
+      <source file="/var/tmp/gre/instance2.img"/>
+      <target bus="virtio" dev="vda"/>
+    </disk>
+  <interface type='bridge'>
+      <source bridge='qbr02'/>
+      <target dev='tap02'/>
+      <model type='virtio'/>
+      <driver name='qemu'/>
+      <address type='pci' domain='0x0000' bus='0x00' slot='0x03' function='0x0'/>
+    </interface>
+    <serial type="file">
+      <source path="/var/tmp/gre/instance2.log"/>
+    </serial>
+    <serial type="pty"/>
+    <input type="tablet" bus="usb"/>
+    <graphics type="vnc" autoport="yes" keymap="en-us" listen="0.0.0.0"/>
+    <video>
+      <model type="cirrus"/>
+    </video>
+  </devices>
+</domain>
+8. 启动instance
+virsh define instance2.xml
+virsh start instance2
+virsh vncdisplay instance2
+vncviewer :0
+9. 启动console 以后,登录添加ip得知 192.168.1.12
+ip addr add 192.168.1.12/24 dev eth0
+route add default gw 192.168.1.1
+10. 创建一个内部bridge br-int， 模拟 OpenStack integrated bridge
+ovs-vsctl add-br br-int
+ovs-vsctl add-port br-int gre0 -- set interface gre0 type=gre options:remote_ip=192.168.4.201
+11. 创建一个veth peer，连接Linux Bridge 'qbr02' 和 OpenvSwich Bridge 'br-ini'
+ip link add qvo02 type veth peer name qvb02
+brctl addif qbr02 qvb02
+ovs-vsctl add-port br-int qvo02
+ovs-vsctl set port qvo02 tag=100
+ip link set qvb02 up
+ip link set qvo02 up
+12. 查看现在compute1 上的 br-int
+ovs-vsctl show
+13. 检查是否能连通instance1，在instance2的控制台
+ping 192.168.1.11
+通过 Network Namespace 实现租户私有网络互访
+network1:
+14. 添加一个namespace，dhcp01用于隔离租户网络。
+ip netns add dhcp01
+15. 为私有网络192.168.1.0/24 ，在命名空间dhcp01 中 创建dhcp 服务
+ovs-vsctl add-port br-int tapdhcp01 -- set interface tapdhcp01 type=internal
+ovs-vsctl set port tapdhcp01 tag=100
+ip link set tapdhcp01 netns dhcp01
+ip netns exec dhcp01 ip addr add 192.168.1.2/24 dev tapdhcp01
+ip netns exec dhcp01 ip link set tapdhcp01 up
+16. 检查网络是否连通，在namespace 访问instance1 和 instance2
+ip netns exec dhcp01 ping 192.168.1.12
+ip netns exec dhcp01 ping 192.168.1.11
+通过 Network Namespace 和Iptables 实现L3 router
+17. 重新配置eth1 和 br-ex
+ovs-vsctl add-br br-ex
+vim /etc/sysconfig/network-scripts/ifcfg-eth1
+
+DEVICE=eth1
+ONBOOT=yes
+BOOTPROTO=none
+PROMISC=yes
+vim /etc/sysconfig/network-scripts/ifcfg-br-ex
+
+DEVICE=br-ex
+TYPE=Bridge
+ONBOOT=no
+BOOTPROTO=none
+18. 重启启动网络服务
+ovs-vsctl add-port br-ex eth1 && service network restart
+ip addr add 172.16.0.201/24 dev br-ex
+ip link set br-ex up
+19. 检查网络，配置后是否连通
+ping 172.16.0.201
+20. 添加一个namespace，router01 用于路由和floating ip 分配
+ip netns add router01
+21. 在br-int添加一个接口，作为私有网络192.168.1.0/24的网关
+ovs-vsctl add-port br-int qr01 -- set interface qr01 type=internal
+ovs-vsctl set port qr01 tag=100
+ip link set qr01 netns router01
+ip netns exec router01 ip addr add 192.168.1.1/24 dev qr01
+ip netns exec router01 ip link set qr01 up
+ip netns exec router01 ip link set lo up
+22. 在br-ex中添加一个接口，用于私网192.168.1.0/24设置下一跳地址
+ovs-vsctl add-port br-ex qg01 -- set interface qg01  type=internal
+ip link set qg01  netns router01
+ip netns exec router01 ip addr add 172.16.0.100/24 dev qg01 
+ip netns exec router01 ip link set qg01 up
+ip netns exec router01 ip link set lo up
+23. 测试联通
+ping 172.16.0.100
+24. 模拟分配floating ip 访问instance1
+为instance1 192.168.1.11 分配floating ip，172.16.0.101
+ip netns exec router01 ip addr add 172.16.0.101/32 dev qg01
+ip netns exec router01  iptables -t nat -A OUTPUT -d 172.16.0.101/32  -j DNAT --to-destination 192.168.1.11
+ip netns exec router01  iptables -t nat -A PREROUTING -d 172.16.0.101/32 -j DNAT --to-destination 192.168.1.11
+ip netns exec router01  iptables -t nat -A POSTROUTING -s 192.168.1.11/32 -j SNAT --to-source 172.16.0.101
+ip netns exec router01  iptables -t nat -A POSTROUTING -s 192.168.1.0/24 -j SNAT --to-source 172.16.0.100
+25. 测试floating ip
+ping 172.16.0.101
